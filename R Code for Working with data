@@ -1,0 +1,253 @@
+pacman::p_load(tidyverse,
+               DataExplorer,
+               lubridate,
+               ggplot2,
+               plotly,
+               FactoMineR,
+               factoextra,
+               tidytext,
+               rsample,
+               caret,
+               tidymodels,
+               lime,
+               ranger,
+               xgboost,
+               VIM,
+               readr,
+               missForest,
+               Amelia, 
+               corrplot,
+               partykit,
+               randomForest)
+
+
+dic <- "E:/Data modelling/HR DATA"
+file_path <- file.path(dic, "HR DATA.txt")
+hrd <- read.table(file = file_path, sep = "\t", header = TRUE,fill = TRUE)
+
+
+
+hrd %>% 
+  filter(Employee_Name %in% hrd[duplicated(hrd$Employee_Name),"Employee_Name"])
+
+hrd[duplicated(hrd$Employee_Name),]$Employee_Name <- paste(hrd[duplicated(hrd$Employee_Name),]$Employee_Name,"2",sep = "")
+
+hrd[duplicated(hrd$Employee_Name),]
+
+
+hrd <- hrd %>% 
+  select(-c(EmpID,Zip,MarriedID,EmpID,MaritalStatusID,GenderID,EmpStatusID,
+            DeptID,PerfScoreID,ManagerID,Original.DS,PositionID,DaysLateLast30))
+
+hrd <- hrd %>% 
+  mutate(DOB = dmy(DOB),
+         DateofHire = dmy(DateofHire),
+         DateofTermination = dmy(DateofTermination),
+         LastPerformanceReview_Date = dmy(LastPerformanceReview_Date),
+         FromDiversityJobFairID = as.factor(FromDiversityJobFairID),
+         Termd = as.factor(Termd)) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate(Employee_Name = as.character(Employee_Name))
+
+dob <- read.table(file = file_path, sep = "\t", header = TRUE,fill = TRUE)
+dob <- strsplit(dob$DOB,split = "-") 
+
+dob <- data.frame(matrix(unlist(dob), nrow=length(dob), byrow=T)) %>% 
+  setNames(c("day","month","year")) %>% 
+  mutate(year_new = paste("19",year,sep = ""))
+
+hrd <- hrd %>% 
+  mutate(DOB = paste(dob$day,dob$month,dob$year_new,sep = "-"),
+         DOB = dmy(DOB))
+
+DataExplorer::profile_missing(hrd)
+
+recent <- as.Date("2022-02-28")
+
+hrd <- hrd %>%
+  mutate(DateofTermination = replace_na(hrd$DateofTermination,recent),
+         LastPerformanceReview_Date = replace_na(hrd$LastPerformanceReview_Date,recent))
+
+hrd %>% 
+  filter(is.na(EngagementSurvey))
+
+
+
+hrd_clean <- hrd %>% 
+  filter(!is.na(EngagementSurvey))
+
+DataExplorer::profile_missing(hrd_clean)
+DataExplorer::profile_missing(hrd)
+
+
+hrd_clean <- hrd_clean %>% 
+  mutate(age = as.numeric(round((DateofHire - DOB)/365)),
+         DayAfterReview = as.numeric(round(recent - LastPerformanceReview_Date)),
+         WorkingDay = ifelse(Termd == 0,
+                             as.numeric(round(recent - DateofHire)),
+                             as.numeric(round(DateofTermination - DateofHire))))
+
+
+pca <- PCA(hrd_clean %>% `rownames<-`(hrd_clean$Employee_Name),
+           quali.sup = c(1,7,13,14,24,26,factor),scale.unit = T,graph = F)
+summary(pca)
+
+options(ggrepel.max.overlaps = Inf)
+plot.PCA(pca,choix = "ind",invisible = "quali",select = "contrib10",habillage = 4)
+
+plot.PCA(pca,choix = "var")
+
+fviz_pca_biplot(pca,habillage = 4,invisible = "quali",label = "var",)
+
+
+#Manager and Performance rating correlation  
+chisq.test(hrd_clean$ManagerName,hrd_clean$PerformanceScore)
+
+hrd_clean <- hrd_clean %>% 
+  droplevels()
+
+#Frequency Performance rating by manager on Employee
+table(hrd_clean$ManagerName,hrd_clean$PerformanceScore) %>% 
+  as.data.frame() %>% 
+  mutate(Var1 = reorder_within(Var1,by = Freq,within = Var2)) %>% 
+  ggplot(aes(x = Freq, y = Var1)) +
+  geom_col(aes(fill = Var2)) +
+  scale_fill_brewer(palette = "RdGy") +
+  facet_wrap(~Var2,scales = "free") +
+  scale_y_reordered() +
+  labs(title = "Employee Performance by Manager",
+       subtitle = "Who have the Best Employee?",
+       x = "Frequency", y = "Manager Name") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+#each manager' employee performance and its percentage
+hrd_clean %>% 
+  group_by(ManagerName) %>% 
+  count() %>% 
+  arrange(-n)
+
+manager_perf <- table(hrd_clean$ManagerName,hrd_clean$PerformanceScore) %>% 
+  as.data.frame() %>% 
+  pivot_wider(names_from = "Var2",values_from = "Freq") %>% 
+  mutate(perc_exceed = round( Exceeds / (Exceeds + `Fully Meets` + `Needs Improvement` + PIP),3),
+         perc_pip = round(PIP/ (Exceeds + `Fully Meets` + `Needs Improvement` + PIP),3))
+
+#Best Performacne employee from Manager
+manager_perf %>% 
+  select(c(Var1,Exceeds,perc_exceed)) %>% 
+  pivot_longer(cols = c(Exceeds,perc_exceed)) %>% 
+  ggplot(aes(x = value, y = reorder(Var1,value))) +
+  geom_col(aes(fill = name),show.legend = F) +
+  scale_fill_manual(values = c("#bf0808","#3b3b3b")) +
+  facet_wrap(~name,scales = "free_x") +
+  labs(title = "Best Employee Performance by Manager",
+       subtitle = "Frequency and Percentage",
+       x = "Value", y = "Manager Name") +
+  theme_minimal()
+
+
+#Worst Employee Performance by Manger
+manager_perf %>% 
+  select(c(Var1,PIP,perc_pip)) %>% 
+  pivot_longer(cols = c(PIP,perc_pip)) %>% 
+  ggplot(aes(x = value, y = reorder(Var1,value))) +
+  geom_col(aes(fill = name),show.legend = F) +
+  scale_fill_manual(values = c("#bf0808","#3b3b3b")) +
+  facet_wrap(~name,scales = "free_x") +
+  labs(title = "Worst Employee Performance by Manager",
+       subtitle = "Frequency and Percentage",
+       x = "Value", y = "Manager Name") +
+  theme_minimal()
+
+#################################
+
+#Hypothesis testing for PayRate and other numeric Variables
+
+hrd_clean %>% 
+  group_by(Department) %>% 
+  summarise(avg_PayRate = mean(PayRate),
+            median_PayRate = median(PayRate),
+            min_PayRate = min(PayRate),
+            max_PayRate = max(PayRate)) %>% 
+  arrange(-median_PayRate)
+
+
+hrd_clean %>% 
+  filter(Termd == 0) %>% 
+  select(PayRate,Department,WorkingDay) %>% 
+  ggplot(aes(x = WorkingDay, y = PayRate)) +
+  geom_point(aes(col = WorkingDay),show.legend = F) +
+  scale_color_continuous(low = "#3b3b3b",high = "#bf0808") +
+  facet_wrap(~Department) +
+  labs(title = "PayRate and WorkingDay Correlation",
+       subtitle = "by each department") +
+  theme_minimal()
+
+
+GGally::ggcorr(hrd_clean %>% 
+                 select_if(is.numeric),label = T,legend.position = "none")
+
+cor.test(hrd_clean$PayRate,hrd_clean$SpecialProjectsCount)
+
+#Table for which department have highest special Project
+
+hrd_clean %>% 
+  group_by(Department) %>% 
+  summarise(total = sum(SpecialProjectsCount),
+            avg = mean(SpecialProjectsCount)) %>% 
+  arrange(-avg)
+######################################
+
+#Modeling 
+
+#Removing Low variance Data Column 
+zero_var <- nearZeroVar(hrd_clean)
+zero_var
+hrd_mod <- hrd_clean[,-zero_var]
+
+hrd_mod <- hrd_mod %>% 
+  select(-c(Employee_Name,DOB,DateofHire,TermReason,EmploymentStatus,WorkingDay))
+
+#Splitting data 
+prop.table(table(hrd_mod$Termd))
+
+set.seed(123)
+splitter <- initial_split(hrd_mod,prop = 0.8,strata = "Termd")
+train <- training(splitter)
+test <- testing(splitter)
+
+
+prop.table(table(train$PayRate))
+
+#DownSampling 
+train_down <- downSample(train %>% select(-Termd), train$Termd)
+
+train_down <- train_down %>% 
+  rename("Termd" = "Class")
+prop.table(table(train_down$Termd))
+
+
+#Random Forest
+set.seed(1234)
+rf_mod <- 
+  rand_forest(mode = "classification") %>% 
+  set_engine("ranger")
+rf_fit <- rf_mod%>% fit( Termd ~ ., data = train_down)
+rf_fit
+
+pred_rf <- predict(rf_fit,test, type = "prob")
+pred_rf_class <- as.factor(ifelse(pred_rf$.pred_0 >0.5, 0,1))
+conf_rf <- confusionMatrix(pred_rf_class,test$Termd,positive = "0", mode = "everything")
+conf_rf
+
+#XGBoost
+mod_xgb <- boost_tree(mode = "classification") %>%
+     set_engine("xgboost")
+xgb_fit <- mod_xgb%>% fit(Termd~., data = train_down)
+xgb_fit
+
+pred_xgb <- predict(xgb_fit,test,type = "prob")
+pred_xgb_class <- as.factor(ifelse(pred_xgb$.pred_0 > 0.5, 0,1))
+conf_xgb <- confusionMatrix(pred_xgb_class,test$Termd,positive = "0", mode = "everything")
+conf_xgb
